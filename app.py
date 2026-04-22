@@ -1,30 +1,74 @@
 import streamlit as st
 import pandas as pd
+import folium
+from streamlit_folium import folium_static
+import json
 
-st.set_page_config(page_title="Gatelangs Oslo", layout="wide")
+st.set_page_config(page_title="Gatelangs Oslo 3.0", layout="wide")
 
-st.title("🏃‍♂️ Gatelangs Oslo - Versjon 3.0")
-
-# Prøv å lese regnearket
-try:
-    # Finn filnavnet (vi antar den heter det du lastet opp)
+# --- DATA-LASTING ---
+@st.cache_data
+def last_data():
     filnavn = "Gater Transport  20260419.ods"
-    
-    # Les fane 1 (Logg)
+    # Les gåtte gater (Fane 1)
     df_logg = pd.read_excel(filnavn, sheet_name=0, engine="odf")
-    # Les fane 2 (Fasit)
-    df_fasit = pd.read_excel(filnavn, sheet_name=1, engine="odf")
-
-    st.success(f"✅ Kontakt med regnearket! Fant {len(df_logg)} rader i loggen.")
+    # Rens kolonne B for gåtte gater
+    gåtte_gater = set(df_logg.iloc[3:, 1].dropna().astype(str).str.strip())
     
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Antall rader i loggen", len(df_logg))
-    with col2:
-        st.metric("Gater i fasit (rådata)", "Beregnes snart...")
+    # Last geometri (denne fila lager jeg til deg nå)
+    try:
+        with open("oslo_geometri.geojson", "r", encoding="utf-8") as f:
+            geo_data = json.load(f)
+    except:
+        geo_data = None
+        
+    return gåtte_gater, geo_data
 
-    st.info("Neste steg: Her kommer kartet så snart vi har generert koordinatene!")
+gåtte_gater, geo_data = last_data()
 
-except Exception as e:
-    st.error(f"Kunne ikke lese regnearket. Sjekk at filnavnet er nøyaktig 'Gater Transport  20260419.ods'.")
-    st.write("Feilmelding:", e)
+# --- SIDEBAR (STATISTIKK) ---
+st.sidebar.title("📊 Statistikk")
+total_gater = len(geo_data['features']) if geo_data else 0
+antall_gått = 0
+
+if geo_data:
+    # Sjekk hvilke gater i GeoJSON som finnes i loggen
+    for feature in geo_data['features']:
+        if feature['properties']['name'] in gåtte_gater:
+            antall_gått += 1
+
+prosent = (antall_gått / total_gater * 100) if total_gater > 0 else 0
+
+st.sidebar.metric("Gater totalt", total_gater)
+st.sidebar.metric("Gater gått", antall_gått)
+st.sidebar.progress(prosent / 100)
+st.sidebar.write(f"Du har gått **{prosent:.1f}%** av Oslo!")
+
+# --- HOVEDSKJERM ---
+st.title("🏃‍♂️ Gatelangs Oslo")
+
+if not geo_data:
+    st.warning("Venter på kartdata... Last opp 'oslo_geometri.geojson' til GitHub.")
+else:
+    # Lag kartet
+    m = folium.Map(location=[59.91, 10.75], zoom_start=12, tiles="cartodbpositron")
+
+    # Tegn gatene
+    for feature in geo_data['features']:
+        gate_navn = feature['properties']['name']
+        er_gått = gate_navn in gåtte_gater
+        farge = "green" if er_gått else "red"
+        
+        folium.GeoJson(
+            feature,
+            style_function=lambda x, f=farge: {
+                "color": f,
+                "weight": 3,
+                "opacity": 0.7
+            },
+            tooltip=gate_navn
+        ).add_to(m)
+
+    folium_static(m, width=1000, height=600)
+
+st.caption("Data fra OpenStreetMap og gå-gruppas regneark.")

@@ -11,9 +11,19 @@ import os
 
 # --- KONFIGURASJON ---
 st.set_page_config(page_title="Gatelangs Oslo v3.1", layout="wide")
+
+# CSS-fix: Hindrer at zoom-knapper forsvinner og trimmer topp-plass
+st.markdown("""
+    <style>
+    .stMain { padding-top: 0.5rem; }
+    .leaflet-top { top: 10px !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
 st.markdown("#### 🏃‍♂️ Gatelangs Oslo v3.1")
 
 def super_rens(s):
+    """Normaliserer navn for sammenligning."""
     if not s or pd.isna(s): return ""
     s = unicodedata.normalize('NFC', str(s)).lower()
     s = re.sub(r'\(.*\)', '', s)
@@ -23,12 +33,10 @@ def super_rens(s):
 @st.cache_data(show_spinner=False)
 def last_data():
     try:
-        # Finn .ods-fil
         alle_filer = os.listdir(".")
         ods_filer = [f for f in alle_filer if f.endswith(".ods")]
         if not ods_filer: return None, None, "Mangler .ods-fil"
         
-        # Les logg
         df_logg = pd.read_excel(ods_filer[0], sheet_name=0, engine="odf")
         logg_dict = {}
         for _, row in df_logg.iloc[3:].iterrows():
@@ -40,7 +48,6 @@ def last_data():
             if n:
                 if n not in logg_dict or d < logg_dict[n]: logg_dict[n] = d
         
-        # Les GeoJSON
         with open("oslo_geometri.geojson", "r", encoding="utf-8") as f:
             geo_data = json.load(f)
             
@@ -48,12 +55,17 @@ def last_data():
     except Exception as e:
         return None, None, str(e)
 
-# --- INITIERING ---
+# --- INITIALISERING AV KART-STATUR ---
+# Bruker session_state så kartet "husker" zoom/senter når du søker
+if 'center' not in st.session_state:
+    st.session_state.center = [59.915, 10.74]
+    st.session_state.zoom = 12
+
 if 'klar' not in st.session_state:
     with st.status("🚀 Initierer Oslo...", expanded=True) as status:
         geo_data, logg_data, feil = last_data()
         if feil: st.error(feil); st.stop()
-        status.update(label="✅ Kartet er klart!", state="complete", expanded=False)
+        status.update(label=f"✅ {len(geo_data['features'])} gater klare!", state="complete", expanded=False)
         st.session_state['klar'] = True
 else:
     geo_data, logg_data, feil = last_data()
@@ -61,37 +73,72 @@ else:
 # --- SIDEBAR ---
 st.sidebar.title("📊 Status")
 
-# Tids-slider
 min_d = datetime.date(2019, 1, 1)
 max_d = datetime.date.today()
 valgt_dato = st.sidebar.slider("Fremdrift til:", min_d, max_d, max_d, format="DD.MM.YY")
 
-# Beregn gåtte gater lynraskt
 gåtte_nå = {k for k, v in logg_data.items() if v <= valgt_dato}
 
-# Finn gater i kartet for statistikk
-unike_gater_kart = {super_rens(f['properties']['name']) for f in geo_data['features']}
-total = len(unike_gater_kart)
-gått = len(unike_gater_kart & gåtte_nå)
+# Bygg register for søk og statistikk
+gater_i_kart = {}
+bydels_stat = {}
+
+for f in geo_data['features']:
+    n = f['properties']['name']
+    r = super_rens(n)
+    b = f['properties'].get('bydel', 'Oslo')
+    
+    if r not in gater_i_kart:
+        # Lagre koordinater for zoom (vi tar det første punktet i linja)
+        coords = f['geometry']['coordinates']
+        if f['geometry']['type'] == "LineString":
+            p = coords[0]
+        else: # MultiLineString
+            p = coords[0][0]
+        gater_i_kart[r] = {'navn': n, 'coords': [p[1], p[0]]}
+        
+    if b not in bydels_stat: bydels_stat[b] = {'total': 0, 'gått': 0}
+    bydels_stat[b]['total'] += 1
+    if r in gåtte_nå:
+        bydels_stat[b]['gått'] += 1
+
+total = len(gater_i_kart)
+gått = len(gater_i_kart.keys() & gåtte_nå)
 prosent = (gått/total*100) if total > 0 else 0
 
-st.sidebar.metric("Total fremdrift", f"{prosent:.1f}%", f"{gått} av {total}")
+st.sidebar.metric("Fremdrift", f"{prosent:.1f}%", f"{gått} / {total} gater")
 st.sidebar.progress(prosent / 100)
 
-# Søk (uten automatisk zoom for å bevare ytelse på slider)
+# SØK-FUNKSJONALITET
 st.sidebar.markdown("---")
-søk = st.sidebar.text_input("🔍 Finn en gate:")
+søk = st.sidebar.text_input("🔍 Finn og zoom til gate:")
 if søk:
     s_rens = super_rens(søk)
-    if s_rens in gåtte_nå: st.sidebar.success("✅ Gått!")
-    elif s_rens in unike_gater_kart: st.sidebar.warning("❌ Ikke gått")
+    if s_rens in gater_i_kart:
+        st.session_state.center = gater_i_kart[s_rens]['coords']
+        st.session_state.zoom = 16
+        status_ikon = "✅ GÅTT" if s_rens in gåtte_nå else "❌ IKKE GÅTT"
+        st.sidebar.success(f"{gater_i_kart[s_rens]['navn']}: {status_ikon}")
+    else:
+        st.sidebar.error(f"Finner ikke '{søk}' i fasiten.")
 
-# --- KARTET (OPTIMALISERT) ---
-m = folium.Map(location=[59.915, 10.74], zoom_start=13, tiles="cartodbpositron")
+# BYDELSSTATISTIKK
+with st.sidebar.expander("🏘️ Se per bydel"):
+    for b, s in sorted(bydels_stat.items()):
+        p_bydel = (s['gått']/s['total']*100)
+        st.write(f"**{b}**: {p_bydel:.0f}% ({s['gått']}/{s['total']})")
 
-LocateControl(auto_start=False).add_to(m)
+# --- KARTET ---
+m = folium.Map(
+    location=st.session_state.center, 
+    zoom_start=st.session_state.zoom, 
+    tiles="cartodbpositron"
+)
 
-# Her er "tricket": Vi lager én samlet funksjon for stil
+# GPS-knapp
+LocateControl(auto_start=False, strings={"title": "Hvor er jeg?"}).add_to(m)
+
+# Farge-funksjon
 def style_f(feature):
     er_gått = super_rens(feature['properties']['name']) in gåtte_nå
     return {
@@ -100,7 +147,7 @@ def style_f(feature):
         'opacity': 0.7 if er_gått else 0.4
     }
 
-# Legg til hele GeoJSON-filen som ETT lag
+# Tegn hele Oslo
 folium.GeoJson(
     geo_data,
     style_function=style_f,

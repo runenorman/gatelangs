@@ -12,11 +12,11 @@ import os
 # --- KONFIGURASJON ---
 st.set_page_config(page_title="Gatelangs Oslo v3.1", layout="wide")
 
-# CSS for å rydde opp i marginer og gi plass til kartet
+# CSS for å rydde opp i marginer og sikre at kartet fyller skjermen
 st.markdown("""
     <style>
     .stMain { padding-top: 0.5rem; }
-    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
+    [data-testid="stSidebar"] { padding-top: 0.5rem; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -33,11 +33,11 @@ def super_rens(s):
 @st.cache_data(show_spinner=False)
 def last_og_prosesser_data():
     try:
-        # 1. Finn og les .ods-fil
+        # 1. Finn og les .ods-fil automatisk
         alle_filer = os.listdir(".")
         ods_filer = [f for f in alle_filer if f.endswith(".ods")]
         if not ods_filer: 
-            return None, None, "Mangler .ods-fil i GitHub-mappen."
+            return None, None, "Mangler .ods-fil i mappen."
         
         df_logg = pd.read_excel(ods_filer[0], sheet_name=0, engine="odf")
         logg_dict = {}
@@ -55,7 +55,7 @@ def last_og_prosesser_data():
         
         # 2. Les GeoJSON
         if "oslo_geometri.geojson" not in alle_filer:
-            return None, None, "Mangler 'oslo_geometri.geojson' i GitHub-mappen."
+            return None, None, "Mangler 'oslo_geometri.geojson'."
             
         with open("oslo_geometri.geojson", "r", encoding="utf-8") as f:
             geo_data = json.load(f)
@@ -85,15 +85,15 @@ else:
 # --- SIDEBAR ---
 st.sidebar.title("📊 Status")
 
-# 1. Tids-slider
+# Tids-slider
 min_d = datetime.date(2019, 1, 1)
 max_d = datetime.date.today()
 valgt_dato = st.sidebar.slider("Fremdrift til:", min_d, max_d, max_d, format="DD.MM.YY")
 
-# Beregn hvilke gater som er gått innen valgt dato
+# Beregn hvilke gater som er gått
 gaatte_naa = {k for k, v in logg_data.items() if v <= valgt_dato}
 
-# 2. Statistikk (Unike gatenavn)
+# Finn unike navn og koordinater for zoom
 gater_i_kart_info = {} 
 unike_navn_i_kart = set()
 
@@ -104,22 +104,19 @@ for f in geo_data['features']:
     
     if r not in gater_i_kart_info:
         coords = f['geometry']['coordinates']
-        # Finn et startpunkt for zoom
-        if f['geometry']['type'] == "LineString":
-            p = coords[0]
-        else: # MultiLineString
-            p = coords[0][0]
+        p = coords[0] if isinstance(coords[0][0], (int, float)) else coords[0][0]
         gater_i_kart_info[r] = {'navn': n, 'coords': [p[1], p[0]]}
 
 total_gater = len(unike_navn_i_kart)
 antall_gaatt = len(unike_navn_i_kart & gaatte_naa)
 prosent = (antall_gaatt / total_gater * 100) if total_gater > 0 else 0
 
+# Metrics uten bakgrunnsfarge (for bedre lesbarhet)
 st.sidebar.metric("Gater i fasit", total_gater)
 st.sidebar.metric("Gater gått", antall_gaatt, delta=f"{prosent:.1f}%")
 st.sidebar.progress(prosent / 100)
 
-# 3. Søk og Zoom
+# Søk og Zoom
 st.sidebar.markdown("---")
 søk = st.sidebar.text_input("🔍 Finn og zoom til gate:")
 if søk:
@@ -128,9 +125,9 @@ if søk:
         st.session_state.center = gater_i_kart_info[s_rens]['coords']
         st.session_state.zoom = 16
         status_tekst = "✅ GÅTT" if s_rens in gaatte_naa else "❌ IKKE GÅTT"
-        st.sidebar.success(f"{gater_i_kart_info[s_rens]['navn']}: {status_tekst}")
+        st.sidebar.info(f"{gater_i_kart_info[s_rens]['navn']}: {status_tekst}")
     else:
-        st.sidebar.error(f"Finner ikke '{søk}' i Oslo")
+        st.sidebar.error(f"Finner ikke '{søk}'")
 
 # --- KARTET ---
 m = folium.Map(
@@ -139,11 +136,11 @@ m = folium.Map(
     tiles="cartodbpositron"
 )
 
-# Blå prikk / GPS
-LocateControl(auto_start=False, strings={"title": "Vis hvor jeg er"}).add_to(m)
+# GPS-knapp
+LocateControl(auto_start=False, strings={"title": "Hvor er jeg?"}).add_to(m)
 
-# Funksjon for fargelegging
-def farge_logikk(feature):
+# Farge-logikk
+def style_f(feature):
     name_rens = super_rens(feature['properties']['name'])
     is_done = name_rens in gaatte_naa
     return {
@@ -152,13 +149,13 @@ def farge_logikk(feature):
         'opacity': 0.7 if is_done else 0.4
     }
 
-# Tegn gatene
+# Tegn gatene som ett lag
 folium.GeoJson(
     geo_data,
-    style_function=farge_logikk,
+    style_function=style_f,
     tooltip=folium.GeoJsonTooltip(fields=['name'], labels=False)
 ).add_to(m)
 
 folium_static(m, width=1000, height=750)
 
-st.caption(f"Status per {valgt_dato.strftime('%d.%m.%Y')}.")
+st.caption(f"Viser status frem til {valgt_dato.strftime('%d.%m.%Y')}.")

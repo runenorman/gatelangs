@@ -12,10 +12,11 @@ import os
 # --- KONFIGURASJON ---
 st.set_page_config(page_title="Gatelangs Oslo v3.1", layout="wide")
 
-# CSS for å rydde opp i marginer
+# CSS for å rydde opp i marginer og gi plass til kartet
 st.markdown("""
     <style>
     .stMain { padding-top: 0.5rem; }
+    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -35,10 +36,11 @@ def last_og_prosesser_data():
         # 1. Finn og les .ods-fil
         alle_filer = os.listdir(".")
         ods_filer = [f for f in alle_filer if f.endswith(".ods")]
-        if not ods_filer: return None, None, "Mangler .ods-fil"
+        if not ods_filer: return None, None, "Mangler .ods-fil i GitHub-mappen."
         
         df_logg = pd.read_excel(ods_filer[0], sheet_name=0, engine="odf")
         logg_dict = {}
+        # Kolonne B (1) er navn, Kolonne O (14) er dato
         for _, row in df_logg.iloc[3:].iterrows():
             n = super_rens(row.iloc[1])
             try:
@@ -49,12 +51,15 @@ def last_og_prosesser_data():
                 if n not in logg_dict or d < logg_dict[n]: logg_dict[n] = d
         
         # 2. Les GeoJSON
+        if "oslo_geometri.geojson" not in alle_filer:
+            return None, None, "Mangler 'oslo_geometri.geojson' i GitHub-mappen."
+            
         with open("oslo_geometri.geojson", "r", encoding="utf-8") as f:
             geo_data = json.load(f)
             
         return geo_data, logg_dict, None
     except Exception as e:
-        return None, None, str(e)
+        return None, None, f"Feil ved lasting: {str(e)}"
 
 # --- INITIALISERING ---
 if 'center' not in st.session_state:
@@ -66,7 +71,6 @@ if 'klar' not in st.session_state:
         geo_data, logg_data, feil = last_og_prosesser_data()
         if feil: st.error(feil); st.stop()
         
-        # Finn antall UNLIKE gatenavn i kartfilen
         unike_i_kart = {super_rens(f['properties']['name']) for f in geo_data['features']}
         status.update(label=f"✅ {len(unike_i_kart)} gater klare!", state="complete", expanded=False)
         st.session_state['klar'] = True
@@ -81,11 +85,12 @@ min_d = datetime.date(2019, 1, 1)
 max_d = datetime.date.today()
 valgt_dato = st.sidebar.slider("Fremdrift til:", min_d, max_d, max_d, format="DD.MM.YY")
 
-# Beregn gåtte gater basert på slider
-gåtte_nøkler_nå = {k for k, v in logg_data.items() if v <= valgt_dato}
+# Beregn hvilke gater som er gått innen valgt dato
+# Bruker navnet 'gaatte_naa' konsekvent nå
+gaatte_naa = {k for k, v in logg_data.items() if v <= valgt_dato}
 
-# 2. Statistikk (Basert på unike navn)
-gater_i_kart_info = {} # For søk og zoom
+# 2. Statistikk (Unike gatenavn)
+gater_i_kart_info = {} 
 unike_navn_i_kart = set()
 
 for f in geo_data['features']:
@@ -95,51 +100,19 @@ for f in geo_data['features']:
     
     if r not in gater_i_kart_info:
         coords = f['geometry']['coordinates']
+        # Håndterer både LineString og MultiLineString for zoom
         p = coords[0] if isinstance(coords[0][0], (int, float)) else coords[0][0]
         gater_i_kart_info[r] = {'navn': n, 'coords': [p[1], p[0]]}
 
-total = len(unike_navn_i_kart)
-gått = len(unike_navn_i_kart & gåtte_nøkler_nå)
-prosent = (gått/total*100) if total > 0 else 0
+total_gater = len(unike_navn_i_kart)
+antall_gaatt = len(unike_navn_i_kart & gaatte_naa)
+prosent = (antall_gaatt / total_gater * 100) if total_gater > 0 else 0
 
-st.sidebar.metric("Gater i fasit", total)
-st.sidebar.metric("Gater gått", gått, delta=f"{prosent:.1f}%")
+st.sidebar.metric("Gater i fasit", total_gater)
+st.sidebar.metric("Gater gått", antall_gaatt, delta=f"{prosent:.1f}%")
 st.sidebar.progress(prosent / 100)
 
-# 3. Søk-funksjonalitet
+# 3. Søk og Zoom
 st.sidebar.markdown("---")
 søk = st.sidebar.text_input("🔍 Finn og zoom til gate:")
 if søk:
-    s_rens = super_rens(søk)
-    if s_rens in gater_i_kart_info:
-        st.session_state.center = gater_i_kart_info[s_rens]['coords']
-        st.session_state.zoom = 16
-        status_tekst = "✅ GÅTT" if s_rens in gåtte_nøkler_nå else "❌ IKKE GÅTT"
-        st.sidebar.success(f"{gater_i_kart_info[s_rens]['navn']}: {status_tekst}")
-    else:
-        st.sidebar.error(f"Finner ikke '{søk}'")
-
-# --- KARTET ---
-m = folium.Map(
-    location=st.session_state.center, 
-    zoom_start=st.session_state.zoom, 
-    tiles="cartodbpositron"
-)
-
-LocateControl(auto_start=False, strings={"title": "Hvor er jeg?"}).add_to(m)
-
-def style_f(feature):
-    er_gått = super_rens(feature['properties']['name']) in gåtte_nå
-    return {
-        'color': 'green' if er_gått else 'red',
-        'weight': 3 if er_gått else 2,
-        'opacity': 0.7 if er_gått else 0.4
-    }
-
-folium.GeoJson(
-    geo_data,
-    style_function=style_f,
-    tooltip=folium.GeoJsonTooltip(fields=['name'], labels=False)
-).add_to(m)
-
-folium_static(m, width=1000, height=750)

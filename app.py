@@ -6,12 +6,12 @@ import json
 import re
 import unicodedata
 from folium.plugins import LocateControl
-import time
+import datetime
 
-# --- KONFIGURASJON OG STIL ---
-st.set_page_config(page_title="Gatelangs v3.1", layout="wide")
+# --- KONFIGURASJON ---
+st.set_page_config(page_title="Gatelangs Oslo v3.1", layout="wide")
 
-# Forminsk overskriften for å spare plass på mobil
+# Liten overskrift for å spare plass på mobil
 st.markdown("#### 🏃‍♂️ Gatelangs Oslo v3.1")
 
 def super_rens(s):
@@ -21,147 +21,137 @@ def super_rens(s):
     s = re.sub(r'\(.*\)', '', s)
     return "".join(c for c in s if c.isalnum())
 
-# --- DATA-LASTING MED CACHING OG FEEDBACK ---
+# --- DATA-LASTING ---
 @st.cache_data(show_spinner=False)
 def last_og_prosesser_data():
-    filnavn = "Gater Transport  20260419.ods"
+    filnavn = "Gater Transport 20260419.ods"
+    default_dato = datetime.date(2019, 1, 1) # Din foreslåtte "fallback" dato
     
-    # 1. Last GeoJSON (Kartgrunnlag)
     try:
+        # 1. Last GeoJSON
         with open("oslo_geometri.geojson", "r", encoding="utf-8") as f:
             geo_data = json.load(f)
-    except:
-        return None, None, None
 
-    # 2. Last Logg (Fane 1)
-    try:
+        # 2. Last Logg (Fane 1)
         df_logg = pd.read_excel(filnavn, sheet_name=0, engine="odf")
-        # Kolonne B (index 1) er navn, Kolonne O (index 14) er dato
-        logg_data = {}
+        
+        logg_dict = {}
+        # Vi går gjennom kolonne B (navn) og kolonne O (dato)
         for _, row in df_logg.iloc[3:].iterrows():
             g_navn = str(row.iloc[1]).strip()
             nøkkel = super_rens(g_navn)
             raw_dato = row.iloc[14]
             
-            # Prøv å tolke dato
+            # DATOLOGIKK (Din foreslåtte forbedring)
             try:
-                dato = pd.to_datetime(raw_dato).date()
+                pd_dato = pd.to_datetime(raw_dato)
+                if pd.isna(pd_dato):
+                    dato = default_dato
+                else:
+                    dato = pd_dato.date()
             except:
-                dato = pd.Timestamp('2019-01-01').date() # Fallback for gamle rader
+                dato = default_dato
             
             if nøkkel:
-                # Behold eldste dato hvis duplikat
-                if nøkkel not in logg_data or dato < logg_data[nøkkel]:
-                    logg_data[nøkkel] = dato
-    except:
-        logg_data = {}
+                # Behold eldste dato hvis gata er logget flere ganger
+                if nøkkel not in logg_dict or dato < logg_dict[nøkkel]:
+                    logg_dict[nøkkel] = dato
+                    
+        return geo_data, logg_dict
+    except Exception as e:
+        return None, str(e)
 
-    return geo_data, logg_data
-
-# Vis "Vennlig venting" bare når cachen er tom
-if 'data_klar' not in st.session_state:
+# --- INITIERING MED VENNLIG VENTING ---
+if 'init_ferdig' not in st.session_state:
     with st.status("🚀 Initierer Oslo...", expanded=True) as status:
-        st.write("Laster inn kartdata...")
+        st.write("Laster gater fra fasit...")
         geo_data, logg_data = last_og_prosesser_data()
-        st.write(f"Sjekker {len(geo_data['features'])} gater mot loggen...")
-        time.sleep(0.5) # Så man rekker å se meldingen
+        if geo_data:
+            st.write(f"Matcher {len(geo_data['features'])} gater mot loggen...")
         status.update(label="✅ Alt klart!", state="complete", expanded=False)
-        st.session_state['data_klar'] = True
+        st.session_state['init_ferdig'] = True
 else:
     geo_data, logg_data = last_og_prosesser_data()
 
 if not geo_data:
-    st.error("Kunne ikke laste data. Sjekk at filene ligger på GitHub.")
+    st.error("Kunne ikke laste data. Sjekk filnavnet på GitHub.")
     st.stop()
 
-# --- LOGIKK FOR SØK OG ZOOM ---
-if 'map_center' not in st.session_state:
-    st.session_state['map_center'] = [59.915, 10.74]
-    st.session_state['map_zoom'] = 13
-
-# --- SIDEBAR ---
-st.sidebar.markdown("### 📊 Status")
+# --- SIDEBAR (STATISTIKK OG FILTER) ---
+st.sidebar.title("📊 Gatelangs-status")
 
 # 1. TIDS-SLIDER
-alle_datoer = sorted(list(logg_data.values()))
-min_d = alle_datoer[0] if alle_datoer else pd.Timestamp('2019-01-01').date()
-max_d = alle_datoer[-1] if alle_datoer else pd.Timestamp.now().date()
+alle_datoer = sorted([d for d in logg_data.values()])
+min_d = datetime.date(2019, 1, 1)
+max_d = datetime.date.today()
 
-st.sidebar.write("📅 **Tidslinje**")
-valgt_dato = st.sidebar.slider(
-    "Fremdrift frem til:",
-    min_value=min_d,
-    max_value=max_d,
-    value=max_d,
-    format="DD.MM.YY"
-)
+st.sidebar.write("📅 **Tidsreise**")
+valgt_dato = st.sidebar.slider("Se fremdrift frem til:", min_d, max_d, max_d, format="DD.MM.YY")
 
-# Finn gåtte gater per valgt dato
-gåtte_nå = {k for k, v in logg_data.items() if v <= valgt_dato}
+# Finn gåtte gater basert på slideren
+gåtte_nøkler_nå = {k for k, v in logg_data.items() if v <= valgt_dato}
 
-# 2. STATISTIKK
-unike_gater_i_kart = {}
+# 2. STATISTIKK OG BYDELER
+gater_i_kart = {}
 for f in geo_data['features']:
     n = f['properties']['name']
-    unike_gater_i_kart[super_rens(n)] = {
-        'navn': n,
-        'coords': f['geometry']['coordinates'][0][::-1] if f['geometry']['type'] == "LineString" else None
-    }
+    n_rens = super_rens(n)
+    if n_rens not in gater_i_kart:
+        gater_i_kart[n_rens] = {
+            'navn': n, 
+            'coords': f['geometry']['coordinates'][0][::-1] if f['geometry']['type'] == "LineString" else None
+        }
 
-total = len(unike_gater_i_kart)
-gått = len(unike_gater_i_kart.keys() & gåtte_nå)
+total = len(gater_i_kart)
+gått = len(gater_i_kart.keys() & gåtte_nøkler_nå)
 prosent = (gått / total * 100) if total > 0 else 0
 
-st.sidebar.metric("Gater i Oslo", total)
-st.sidebar.metric("Gater gått", gått, delta=f"{prosent:.1f}%")
+st.sidebar.metric("Total fremdrift", f"{prosent:.1f}%", f"{gått} av {total} gater")
 st.sidebar.progress(prosent / 100)
 
 # 3. SØK OG ZOOM
 st.sidebar.markdown("---")
 søk = st.sidebar.text_input("🔍 Finn og zoom til gate:")
+# Default senter hvis ingen søk
+map_center = [59.915, 10.74]
+map_zoom = 12
+
 if søk:
     s_rens = super_rens(søk)
-    if s_rens in unike_gater_i_kart:
-        match = unike_gater_i_kart[s_rens]
-        st.session_state['map_center'] = match['coords']
-        st.session_state['map_zoom'] = 16
-        if s_rens in gåtte_nå:
-            st.sidebar.success(f"✅ Gått!")
-        else:
-            st.sidebar.warning(f"❌ Ikke gått")
+    if s_rens in gater_i_kart:
+        if gater_i_kart[s_rens]['coords']:
+            map_center = gater_i_kart[s_rens]['coords']
+            map_zoom = 16
+            st.sidebar.success(f"Zoomer til {gater_i_kart[s_rens]['navn']}")
     else:
-        st.sidebar.info("Fant ikke gata.")
+        st.sidebar.warning("Fant ikke gata i Oslo-listen.")
 
 # --- KARTET ---
-m = folium.Map(
-    location=st.session_state['map_center'], 
-    zoom_start=st.session_state['map_zoom'], 
-    tiles="cartodbpositron",
-    control_scale=True
-)
+m = folium.Map(location=map_center, zoom_start=map_zoom, tiles="cartodbpositron")
 
-# GPS-knapp
+# NYTT: Blå prikk (GPS)
 LocateControl(
     locateOptions={'enableHighAccuracy': True},
     keepCurrentZoomLevel=True,
     strings={"title": "Hvor er jeg?", "popup": "Du er her"}
 ).add_to(m)
 
-# Tegn gatene
+# Tegn gatene fra GeoJSON
 for feature in geo_data['features']:
     n = feature['properties']['name']
-    er_gått = super_rens(n) in gåtte_nå
+    er_gått = super_rens(n) in gåtte_nøkler_nå
+    farge = "green" if er_gått else "red"
     
     folium.GeoJson(
         feature,
-        style_function=lambda x, f="green" if er_gått else "red": {
+        style_function=lambda x, f=farge: {
             "color": f,
             "weight": 3 if f == "green" else 2,
-            "opacity": 0.7 if f == "green" else 0.5
+            "opacity": 0.7 if f == "green" else 0.4
         },
         tooltip=n
     ).add_to(m)
 
-folium_static(m, width=1000, height=650)
+folium_static(m, width=1000, height=700)
 
-st.caption(f"Viser status frem til {valgt_dato.strftime('%d.%m.%Y')}")
+st.caption(f"Viser gåtte gater frem til {valgt_dato.strftime('%d.%m.%Y')}. Manglende datoer i regneark er satt til 2019.")

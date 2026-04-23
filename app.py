@@ -21,124 +21,90 @@ def super_rens(s):
 
 # --- DATA-LASTING ---
 @st.cache_data(show_spinner=False)
-def last_og_prosesser_data():
-    default_dato = datetime.date(2019, 1, 1)
-    
+def last_data():
     try:
-        # 1. Finn .ods-fila automatisk (uansett navn)
+        # Finn .ods-fil
         alle_filer = os.listdir(".")
         ods_filer = [f for f in alle_filer if f.endswith(".ods")]
+        if not ods_filer: return None, None, "Mangler .ods-fil"
         
-        if not ods_filer:
-            return None, None, "Fant ingen .ods-fil i mappen på GitHub."
-        
-        filnavn = ods_filer[0] # Tar den første den finner
-        
-        # 2. Last Logg (Fane 1)
-        df_logg = pd.read_excel(filnavn, sheet_name=0, engine="odf")
+        # Les logg
+        df_logg = pd.read_excel(ods_filer[0], sheet_name=0, engine="odf")
         logg_dict = {}
         for _, row in df_logg.iloc[3:].iterrows():
-            g_navn = str(row.iloc[1]).strip()
-            nøkkel = super_rens(g_navn)
-            raw_dato = row.iloc[14]
-            
+            n = super_rens(row.iloc[1])
             try:
-                pd_dato = pd.to_datetime(raw_dato)
-                dato = pd_dato.date() if not pd.isna(pd_dato) else default_dato
-            except:
-                dato = default_dato
-            
-            if nøkkel:
-                if nøkkel not in logg_dict or dato < logg_dict[nøkkel]:
-                    logg_dict[nøkkel] = dato
-
-        # 3. Last GeoJSON
-        if "oslo_geometri.geojson" not in alle_filer:
-            return None, None, "Fant ikke 'oslo_geometri.geojson' på GitHub."
-            
+                d = pd.to_datetime(row.iloc[14]).date()
+                if pd.isna(d): d = datetime.date(2019,1,1)
+            except: d = datetime.date(2019,1,1)
+            if n:
+                if n not in logg_dict or d < logg_dict[n]: logg_dict[n] = d
+        
+        # Les GeoJSON
         with open("oslo_geometri.geojson", "r", encoding="utf-8") as f:
             geo_data = json.load(f)
-                    
+            
         return geo_data, logg_dict, None
     except Exception as e:
-        return None, None, f"Teknisk feil: {str(e)}"
+        return None, None, str(e)
 
 # --- INITIERING ---
-if 'init_ferdig' not in st.session_state:
+if 'klar' not in st.session_state:
     with st.status("🚀 Initierer Oslo...", expanded=True) as status:
-        geo_data, logg_data, feilmelding = last_og_prosesser_data()
-        if feilmelding:
-            st.error(feilmelding)
-            st.stop()
-        status.update(label="✅ Alt klart!", state="complete", expanded=False)
-        st.session_state['init_ferdig'] = True
+        geo_data, logg_data, feil = last_data()
+        if feil: st.error(feil); st.stop()
+        status.update(label="✅ Kartet er klart!", state="complete", expanded=False)
+        st.session_state['klar'] = True
 else:
-    geo_data, logg_data, feilmelding = last_og_prosesser_data()
+    geo_data, logg_data, feil = last_data()
 
 # --- SIDEBAR ---
-st.sidebar.title("📊 Gatelangs-status")
+st.sidebar.title("📊 Status")
 
-# TIDS-SLIDER
+# Tids-slider
 min_d = datetime.date(2019, 1, 1)
 max_d = datetime.date.today()
-st.sidebar.write("📅 **Tidsreise**")
-valgt_dato = st.sidebar.slider("Se fremdrift frem til:", min_d, max_d, max_d, format="DD.MM.YY")
+valgt_dato = st.sidebar.slider("Fremdrift til:", min_d, max_d, max_d, format="DD.MM.YY")
 
-gåtte_nøkler_nå = {k for k, v in logg_data.items() if v <= valgt_dato}
+# Beregn gåtte gater lynraskt
+gåtte_nå = {k for k, v in logg_data.items() if v <= valgt_dato}
 
-# STATISTIKK
-gater_i_kart = {}
-for f in geo_data['features']:
-    n = f['properties']['name']
-    n_rens = super_rens(n)
-    if n_rens not in gater_i_kart:
-        # Prøver å finne midtpunktet for zoom
-        coords = f['geometry']['coordinates']
-        if f['geometry']['type'] == "LineString":
-            p = coords[len(coords)//2] # Midterste punkt
-            gater_i_kart[n_rens] = {'navn': n, 'coords': [p[1], p[0]]}
-        else: # MultiLineString
-            p = coords[0][len(coords[0])//2]
-            gater_i_kart[n_rens] = {'navn': n, 'coords': [p[1], p[0]]}
+# Finn gater i kartet for statistikk
+unike_gater_kart = {super_rens(f['properties']['name']) for f in geo_data['features']}
+total = len(unike_gater_kart)
+gått = len(unike_gater_kart & gåtte_nå)
+prosent = (gått/total*100) if total > 0 else 0
 
-total = len(gater_i_kart)
-gått = len(gater_i_kart.keys() & gåtte_nøkler_nå)
-prosent = (gått / total * 100) if total > 0 else 0
-
-st.sidebar.metric("Total fremdrift", f"{prosent:.1f}%", f"{gått} av {total} gater")
+st.sidebar.metric("Total fremdrift", f"{prosent:.1f}%", f"{gått} av {total}")
 st.sidebar.progress(prosent / 100)
 
-# SØK
+# Søk (uten automatisk zoom for å bevare ytelse på slider)
 st.sidebar.markdown("---")
-søk = st.sidebar.text_input("🔍 Finn og zoom til gate:")
-map_center = [59.915, 10.74]
-map_zoom = 12
-
+søk = st.sidebar.text_input("🔍 Finn en gate:")
 if søk:
     s_rens = super_rens(søk)
-    if s_rens in gater_i_kart:
-        map_center = gater_i_kart[s_rens]['coords']
-        map_zoom = 16
-        st.sidebar.success(f"Zoomer til {gater_i_kart[s_rens]['navn']}")
-    else:
-        st.sidebar.warning("Ikke funnet i kartet.")
+    if s_rens in gåtte_nå: st.sidebar.success("✅ Gått!")
+    elif s_rens in unike_gater_kart: st.sidebar.warning("❌ Ikke gått")
 
-# --- KART ---
-m = folium.Map(location=map_center, zoom_start=map_zoom, tiles="cartodbpositron")
+# --- KARTET (OPTIMALISERT) ---
+m = folium.Map(location=[59.915, 10.74], zoom_start=13, tiles="cartodbpositron")
 
-LocateControl(auto_start=False, strings={"title": "Hvor er jeg?"}).add_to(m)
+LocateControl(auto_start=False).add_to(m)
 
-for feature in geo_data['features']:
-    n = feature['properties']['name']
-    er_gått = super_rens(n) in gåtte_nøkler_nå
-    farge = "green" if er_gått else "red"
-    
-    folium.GeoJson(
-        feature,
-        style_function=lambda x, f=farge: {
-            "color": f, "weight": 3 if f == "green" else 2, "opacity": 0.7
-        },
-        tooltip=n
-    ).add_to(m)
+# Her er "tricket": Vi lager én samlet funksjon for stil
+def style_f(feature):
+    er_gått = super_rens(feature['properties']['name']) in gåtte_nå
+    return {
+        'color': 'green' if er_gått else 'red',
+        'weight': 3 if er_gått else 2,
+        'opacity': 0.7 if er_gått else 0.4
+    }
 
-folium_static(m, width=1100, height=700)
+# Legg til hele GeoJSON-filen som ETT lag
+folium.GeoJson(
+    geo_data,
+    style_function=style_f,
+    tooltip=folium.GeoJsonTooltip(fields=['name'], labels=False)
+).add_to(m)
+
+folium_static(m, width=1000, height=750)

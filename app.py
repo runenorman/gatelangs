@@ -12,13 +12,13 @@ import os
 # --- KONFIGURASJON ---
 st.set_page_config(page_title="Gatelangs Oslo v3.1", layout="wide")
 
-# CSS for å rydde opp i marginer og sikre at kontrollknapper er synlige
+# CSS for å rydde opp i marginer og sikre at zoom-knapper er synlige
 st.markdown("""
     <style>
     .stMain { padding-top: 0.5rem; }
-    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
-    /* Fix for zoom-knapper på mobil */
-    .leaflet-top { top: 10px !important; }
+    [data-testid="stSidebar"] { padding-top: 0.5rem; }
+    /* Forsøk på å tvinge zoom-kontroller til toppen */
+    .leaflet-top { top: 10px !important; z-index: 999 !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -35,12 +35,14 @@ def super_rens(s):
 @st.cache_data(show_spinner=False)
 def last_og_prosesser_data():
     try:
+        # 1. Finn og les .ods-fil automatisk
         alle_filer = os.listdir(".")
         ods_filer = [f for f in alle_filer if f.endswith(".ods")]
         if not ods_filer: return None, None, "Mangler .ods-fil i mappen."
         
         df_logg = pd.read_excel(ods_filer[0], sheet_name=0, engine="odf")
         logg_dict = {}
+        # Kolonne B (1) er navn, Kolonne O (14) er dato
         for _, row in df_logg.iloc[3:].iterrows():
             n = super_rens(row.iloc[1])
             try:
@@ -50,6 +52,7 @@ def last_og_prosesser_data():
             if n:
                 if n not in logg_dict or d < logg_dict[n]: logg_dict[n] = d
         
+        # 2. Les GeoJSON
         if "oslo_geometri.geojson" not in alle_filer:
             return None, None, "Mangler 'oslo_geometri.geojson'."
             
@@ -104,13 +107,13 @@ total_gater = len(unike_navn_i_kart)
 antall_gaatt = len(unike_navn_i_kart & gaatte_naa)
 prosent = (antall_gaatt / total_gater * 100) if total_gater > 0 else 0
 
+# Metrics (Uten bakgrunnsfarge for maksimal lesbarhet)
 st.sidebar.metric("Gater i fasit", total_gater)
 st.sidebar.metric("Gater gått", antall_gaatt, delta=f"{prosent:.1f}%")
 st.sidebar.progress(prosent / 100)
 
-# 3. NYTT: Autocomplete Søk
+# 3. Autocomplete Søk
 st.sidebar.markdown("---")
-# Lag en sortert liste over alle gatenavn for rullgardinen
 alfabetisk_liste = sorted([info['navn'] for info in gater_i_kart_info.values()])
 
 valgt_gate = st.sidebar.selectbox(
@@ -135,7 +138,7 @@ m = folium.Map(
     tiles="cartodbpositron"
 )
 
-LocateControl(auto_start=False, strings={"title": "Vis hvor jeg er"}).add_to(m)
+LocateControl(auto_start=False, strings={"title": "Hvor er jeg?"}).add_to(m)
 
 def farge_logikk(feature):
     name_rens = super_rens(feature['properties']['name'])
